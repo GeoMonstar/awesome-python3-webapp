@@ -7,15 +7,21 @@
 
 #创建连接池 创建一个全局的连接池，每个HTTP请求都可以从连接池中直接获取数据库连接。使用连接池的好处是不必频繁地打开和关闭数据库连接，而是能复用就尽量复
 #连接池由全局变量__pool存储,缺省情况下将编码设置为utf8
+__author__ = 'Monstar'
+
 import asyncio,logging
 import aiomysql
 
+def log(sql,args=()):
+    logging.info('SQL:%s'%sql)
 
-@asyncio.coroutine
-def create_pool(loop, **kw):
+
+
+
+async def create_pool(loop, **kw):
     logging.info('create database connection pool...')
     global __pool
-    __pool = yield from aiomysql.create_pool(
+    __pool = await aiomysql.create_pool(
         host = kw.get('host','localhost')
         port = kw.get('port',3306),
         user = kw['user'],
@@ -28,12 +34,12 @@ def create_pool(loop, **kw):
         loop = loop
     )
 #select
-@asyncio.coroutine
-def select(sql,args,size = None):
+
+async def select(sql,args,size = None):
     log(sql,args)
     global __pool
     with (yield from __pool) as conn:
-        cur = yield from conn.cursor(aiomysql.DictCursor)
+        cur = await conn.cursor(aiomysql.DictCursor)
         yield from cur.excute(sql.replace('?','%s'),args or ())
         if size:
             rs = yield from cur.fetchmany(size)
@@ -50,12 +56,12 @@ def select(sql,args,size = None):
 #要执行INSERT、UPDATE、DELETE语句，可以定义一个通用的execute()函数，因为这3种SQL的执行都需要相同的参数，以及返回一个整数表示影响的行数：
 
 
-@asyncio.coroutine
-def excute(sql,args):
+
+async def excute(sql,args):
     log(sql)
     with(yield from __pool)as conn:
         try:
-            cur = yield from conn.cursor()
+            cur = await conn.cursor()
             yield from cur.execute(sql.replace('?','%s'),args)
             affected = cur.rowcount
             yield from cur.close()
@@ -80,6 +86,11 @@ def excute(sql,args):
 #users = User.findAll()
 
 
+def create_args_string(num):
+    L = []
+    for n in range(num):
+        L.append('?')
+    return ', '.join(L)
 #定义Model-首先要定义的是所有ORM映射的基类Model：
 class Model(dict,metaclass=ModelMetaclass):
 
@@ -106,34 +117,67 @@ class Model(dict,metaclass=ModelMetaclass):
                 value = field.default() if callable(field.default) else field.default
                 logging.debug('using default value for %s:%s' %(key,str(value)))
         return value
+@classmethod
+async def findAll(cls,where=None,args=None,**kw):
+    'find object by where clause. '
+    sql = [cls.__select__]
+    if where:
+        sql.append('where')
+        sql.append(where)
+    if args is None:
+        args = []
+    orderBy = kw.get('orderBy',None)
+    if orderBy:
+        sql.append('order by')
+        sql.append(orderBy)
+    limit = kw.get('limit',None)
+        sql.append('limit')
+        if isinstance(limit,int)
+            sql.append('?')
+            args.append(limit)
+        elif isinstance(limit,tuple) and len(limit) == 2:
+            sql.append('?,?')
+            args.extend(limit)
+        else:
+            raise ValueError('Invalid limit value:%s'% str(limit))
+    rs = await select(''.join(sql),args)
+    return [cls(**r)for r in rs]
 
-    @classmethod
-    @asyncio.coroutine
-    def find(cls,pk):
+@classmethon
+async def findNumber(cls,selectField,where=None,args=None):
+    'find number by select and where. '
+    sql = ['select % _num_from `%s`'%(selectField,cls.__table__)]
+    if where:
+        sql.append('where')
+        sql.append(where)
+    rs = await select(''.join(sql),args,1)
+    if len(rs) == 0:
+        return None
+    return rs[0]['_num_']
+
+@classmethod
+async def find(cls,pk):
         ' find object by primary key. '
-        rs = yield from select('%s where `%s`=?' % (cls.__select__, cls.__primary_key__),[pk],1)
+        rs = await select('%s where `%s`=?' % (cls.__select__, cls.__primary_key__),[pk],1)
         if len(rs) == 0:
             return None
         return cls(**rs[0])
-    @asyncio.coroutine
-    def save(self):
+
+async def save(self):
         args = list(map(self.getValueOrDefault,self.__fields__))
         args.append(self.getValueOrDefault(self.__primary_key__))
-        rows = yield from execute(self.__insert__,args)
+        rows = await execute(self.__insert__,args)
         if row !=1:
             logging.warn('failed to insert record:affected rows:%s'% rows)
-    @asyncio.coroutine
-    def update(self):
+async def update(self):
         args = list(map(self.getValue,self.__fields__))
         args.append(self.getValue(select.__primary_key__))
-        rows = yield from execute(self.__update__,args)
+        rows = await execute(self.__update__,args)
         if rows != 1:
             logging.warn('failed to update by primary key:affected rows:%s')
-   
-     @asyncio.coroutine
-     def remove(self):
+async def remove(self):
         args = [self.getValue(self.__primary_key__)]
-        rows = yield from execute(self.__delete__, args)
+        rows = await execute(self.__delete__, args)
         if rows != 1:
             logging.warn('failed to remove by primary key: affected rows: %s' % rows)
 
@@ -147,10 +191,29 @@ class Field(object):
         self.default = default
     def __str__(self):
         return '<%s,%s:%s>' % (self.__class__.__name__,self.column_type,self.name)
+
+
+
 #映射varchar的StringField
 class StringField(Field):
     def __init__(self,name=None,primary_key=False,default=None,ddl='varchar(100)'):
-    super().__init__(name,ddl,primary_key,default)
+        super().__init__(name,ddl,primary_key,default)
+class BooleanField(Field):
+    def __init__(self,name=None,default=False):
+        supper().__init__(name,'boolean',False,default)
+class IntegerField(Field):
+    
+    def __init__(self, name=None, primary_key=False, default=0):
+        super().__init__(name, 'bigint', primary_key, default)
+class FloatField(Field):
+    
+    def __init__(self, name=None, primary_key=False, default=0.0):
+        super().__init__(name, 'real', primary_key, default)
+class TextField(Field):
+    def __init__(self, name=None, default=None):
+        super().__init__(name, 'text', False, default)
+
+
 #Model只是一个基类，如何将具体的子类如User的映射信息读取出来呢？答案就是通过metaclass：ModelMetaclass：
 #这样，任何继承自Model的类（比如User），会自动通过ModelMetaclass扫描映射关系，并存储到自身的类属性如__table__、__mappings__中
 class ModelMetaclass(type):
@@ -191,25 +254,5 @@ class ModelMetaclass(type):
         attrs['__update__'] = 'update `%s` set %s where `%s`=?' % (tableName, ','.join(map(lambda f:'`%s`=?' %(mappings.get(f).name or f),fields)),primaryKey)
         attrs['__delete__'] = 'delete from `%s` where `%s` =?' %(tableName,primaryKey)
         return type.__new__(cls,name,bases,attrs)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
